@@ -1,0 +1,23 @@
+[package]
+name = "unsend"
+version = "0.1.0"
+edition = "2018"
+authors = ["John Nunley <jtnunley01@gmail.com>"]
+description = "A set of utilities for working with thread-unsafe concurrency in Rust"
+repository = "https://github.com/notgull/unsend"
+license = "MIT OR Apache-2.0"
+keywords = ["concurrency", "async", "sync", "thread-unsafe"]
+categories = ["concurrency", "asynchronous"]
+
+[dependencies]
+atomic-waker = "1.0.0"
+log = { version = "0.4.17", default-features = false }
+pin-project-lite = "0.2.9"
+pin-utils = "0.1.0"
+
+[dev-dependencies]
+futures-lite = "1.12.0"
+
+[features]
+default = ["std"]
+std = []
