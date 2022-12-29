@@ -15,6 +15,11 @@ impl<T> OnceCell<T> {
         }
     }
 
+    /// Get the value.
+    pub(crate) fn get(&self) -> Option<&T> {
+        unsafe { (*self.value.get()).as_ref() }
+    }
+
     /// Get the value or initialize it.
     pub(crate) fn get_or_init<F>(&self, f: F) -> &T
     where

@@ -13,19 +13,40 @@ use core::task::{Context, Poll, Waker};
 #[derive(Debug)]
 pub(crate) struct Notify<T>(RefCell<List<T>>);
 
-/// Waiting on a `Notify`.
-#[derive(Debug)]
-pub(crate) struct Listener<'a, T> {
-    /// The `Notify` being waited on.
-    notify: &'a Notify<T>,
+pin_project_lite::pin_project! {
+    // Waiting on a `Notify`.
+    #[derive(Debug)]
+    pub(crate) struct Listener<'a, T> {
+        // The `Notify` being waited on.
+        notify: &'a Notify<T>,
 
-    /// The entry in the linked list.
-    ///
-    /// This is `None` when this entry has not been registered.
-    entry: Option<UnsafeCell<Entry<T>>>,
+        // The entry in the linked list.
+        //
+        // This is `None` when this entry has not been registered.
+        #[pin]
+        entry: Option<UnsafeCell<Entry<T>>>,
 
-    /// This is a `!Unpin` type.
-    _pinned: PhantomPinned,
+        // This is a `!Unpin` type.
+        #[pin]
+        _pinned: PhantomPinned,
+    }
+
+    impl<'a, T> PinnedDrop for Listener<'a, T> {
+        fn drop(mut this: Pin<&mut Self>) {
+            unsafe {
+                let state = this.as_mut().remove_entry();
+
+                if let Some(State::Notified { result, additional }) = state {
+                    let mut result = Some(result);
+                    if additional {
+                        this.notify.notify_additional(1, move || result.take().unwrap());
+                    } else {
+                        this.notify.notify(1, move || result.take().unwrap());
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<T> Notify<T> {
@@ -87,25 +108,15 @@ impl<T> Default for Notify<T> {
 }
 
 impl<T> Listener<'_, T> {
-    /// Pin projection.
-    #[allow(clippy::type_complexity)]
-    fn project(self: Pin<&mut Self>) -> (&Notify<T>, Pin<&mut Option<UnsafeCell<Entry<T>>>>) {
-        // SAFETY: This is a valid pin projection.
-        unsafe {
-            let this = self.get_unchecked_mut();
-            (this.notify, Pin::new_unchecked(&mut this.entry))
-        }
-    }
-
     /// Remove the entry from the linked list.
     unsafe fn remove_entry(self: Pin<&mut Self>) -> Option<State<T>> {
         // SAFETY: This is a valid pin projection.
-        let (notify, mut entry) = self.project();
+        let mut this = self.project();
 
         // Borrow a guard to the linked list.
-        let mut guard = notify.0.borrow_mut();
+        let mut guard = this.notify.0.borrow_mut();
 
-        let entry_ref = match entry.as_mut().as_pin_mut() {
+        let entry_ref = match this.entry.as_mut().as_pin_mut() {
             Some(entry) => entry,
             None => return None,
         };
@@ -118,7 +129,7 @@ impl<T> Listener<'_, T> {
 
         // Now that it's removed we can safely take it out.
         unsafe {
-            entry
+            this.entry
                 .get_unchecked_mut()
                 .take()
                 .map(|t| t.into_inner().state.into_inner())
@@ -130,17 +141,17 @@ impl<T> Future for Listener<'_, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (notify, mut entry) = self.project();
+        let mut this = self.project();
 
         // Borrow a guard to the linked list.
-        let mut guard = notify.0.borrow_mut();
+        let mut guard = this.notify.0.borrow_mut();
 
         // If we aren't inserted, return.
-        let mut entry_ptr = match entry.as_mut().as_pin_mut() {
+        let mut entry_ptr = match this.entry.as_mut().as_pin_mut() {
             Some(entry) => unsafe { NonNull::new_unchecked(entry.get_unchecked_mut().get()) },
             None => {
                 // Create a new entry.
-                entry.as_mut().set(Some(UnsafeCell::new(Entry {
+                this.entry.as_mut().set(Some(UnsafeCell::new(Entry {
                     state: Cell::new(State::Initialized),
                     prev: Cell::new(guard.tail),
                     next: Cell::new(None),
@@ -149,7 +160,7 @@ impl<T> Future for Listener<'_, T> {
                 // Get a pointer to this new entry.
                 let entry = unsafe {
                     NonNull::new_unchecked(
-                        entry
+                        this.entry
                             .as_mut()
                             .as_pin_mut()
                             .unwrap()
@@ -209,24 +220,6 @@ impl<T> Future for Listener<'_, T> {
     }
 }
 
-impl<T> Drop for Listener<'_, T> {
-    fn drop(&mut self) {
-        unsafe {
-            let notify = self.notify;
-            let state = Pin::new_unchecked(self).remove_entry();
-
-            if let Some(State::Notified { result, additional }) = state {
-                let mut result = Some(result);
-                if additional {
-                    notify.notify_additional(1, move || result.take().unwrap());
-                } else {
-                    notify.notify(1, move || result.take().unwrap());
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 struct List<T> {
     /// The number of entries in the linked list.
@@ -248,8 +241,6 @@ struct List<T> {
 impl<T> List<T> {
     /// Remove an entry from the list.
     unsafe fn remove(&mut self, mut entry_ptr: NonNull<Entry<T>>) {
-        std::println!("remove");
-
         // SAFETY: The entry is valid.
         let entry = unsafe { entry_ptr.as_mut() };
 
@@ -366,6 +357,40 @@ impl<T> State<T> {
             State::Notified { .. } | State::Hole => true,
             _ => false,
         }
+    }
+}
+
+/// `Notify`, but lazily initialized on the heap.
+pub(crate) struct LazyNotify<T> {
+    /// The inner `Notify`.
+    inner: UnsafeCell<Option<Box<Notify<T>>>>,
+}
+
+impl<T> LazyNotify<T> {
+    /// Create a new `LazyNotify`.
+    pub const fn new() -> Self {
+        Self {
+            inner: UnsafeCell::new(None),
+        }
+    }
+
+    /// Get a reference to the inner `Notify`.
+    pub fn get(&self) -> &Notify<T> {
+        unsafe {
+            if (*self.inner.get()).is_none() {
+                *self.inner.get() = Some(Box::new(Notify::new()));
+            }
+
+            (*self.inner.get()).as_ref().unwrap()
+        }
+    }
+}
+
+impl<T> core::ops::Deref for LazyNotify<T> {
+    type Target = Notify<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.get()
     }
 }
 

@@ -3,15 +3,20 @@
 use crate::notify::{Listener, Notify};
 use crate::once_cell::OnceCell;
 use crate::queue::Queue;
-use crate::task::{spawn_unchecked, Runnable, Task};
+use crate::task::{spawn_unchecked, Detached, Runnable, Task};
 
 use alloc::rc::Rc;
+use alloc::sync::Arc;
 
-use core::cell::UnsafeCell;
+use core::cell::{RefCell, UnsafeCell};
 use core::future::Future;
 use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
 use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+use slab::Slab;
 
 /// An executor that runs tasks in sequence.
 pub struct Executor<'a> {
@@ -28,6 +33,43 @@ struct State {
 
     /// The signal for when a task has been pushed to the queue.
     task_pushed: Notify<Runnable>,
+
+    /// Every currently running task.
+    running: RefCell<Slab<RunningTask>>,
+}
+
+/// A single task running on this executor.
+struct RunningTask {
+    /// The waker for the task.
+    waker: Waker,
+
+    /// The detached handle for this task, if it is detached.
+    handle: Option<Rc<RefCell<DetachedHandle>>>,
+}
+
+struct DetachedHandle {
+    /// The detached handle for this task.
+    detached: Detached,
+
+    /// The signal for when the task is ready to be rescheduled.
+    signal: Arc<Signal>,
+
+    /// The waker to use as a context when polling the `detached` future.
+    waker: Waker,
+}
+
+impl Drop for Executor<'_> {
+    fn drop(&mut self) {
+        // Run all of the wakers to ensure that all tasks are dropped.
+        if let Some(state) = self.inner.get() {
+            state.running.borrow_mut().drain().for_each(|task| {
+                task.waker.wake();
+            });
+
+            // Drain the queue.
+            state.tasks.clear();
+        }
+    }
 }
 
 impl<'a> Executor<'a> {
@@ -45,6 +87,7 @@ impl<'a> Executor<'a> {
             inner: OnceCell::from(Rc::new(State {
                 task_pushed: Notify::new(),
                 tasks: Queue::new(capacity),
+                running: RefCell::new(Slab::new()),
             })),
             _phantom: PhantomData,
         }
@@ -58,15 +101,85 @@ impl<'a> Executor<'a> {
     /// Spawn a new task on the executor.
     pub fn spawn<F>(&self, future: F) -> Task<F::Output>
     where
-        F: Future<Output = ()> + 'a,
+        F: Future + 'a,
         F::Output: 'a,
     {
+        self.spawn_returns_id(future).0
+    }
+
+    /// Spawn a new daemon task on the executor.
+    pub fn spawn_detached(&self, future: impl Future + 'a) {
+        let (task, task_key) = self.spawn_returns_id(future);
+
+        // Create a signal and a waker to poll it.
+        let signal = Arc::new(Signal(AtomicBool::new(false)));
+        let waker = signal.clone().into_waker();
+
+        // Insert the new detached handle.
+        let handle = self.state().running.borrow_mut()[task_key]
+            .handle
+            .insert(Rc::new(RefCell::new(DetachedHandle {
+                detached: task.detach(),
+                signal,
+                waker,
+            })))
+            .clone();
+
+        // Poll the detached handle once to register the new waker.
+        handle.borrow_mut().poll();
+    }
+
+    fn spawn_returns_id<F>(&self, future: F) -> (Task<F::Output>, usize)
+    where
+        F: Future + 'a,
+        F::Output: 'a,
+    {
+        // Wrap the future such that it deregisters itself once it completes.
+        let task_key = self.state().running.borrow().vacant_key();
+        let future = {
+            let state = self.state().clone();
+
+            async move {
+                // Deregister this task once we're done.
+                let _guard = CallOnDrop(move || {
+                    state.running.borrow_mut().remove(task_key);
+                });
+
+                // Run the task.
+                future.await
+            }
+        };
+
         // SAFETY: We prevent the waker/future from outliving the executor.
         let (runnable, task) = unsafe { spawn_unchecked(future, self.schedule()) };
 
+        // Insert the task into our active list.
+        self.state().running.borrow_mut().insert(RunningTask {
+            waker: runnable.waker(),
+            handle: None,
+        });
+
         // Schedule the task.
         runnable.schedule();
-        task
+        (task, task_key)
+    }
+
+    /// Poll all of the detached tasks on the executor.
+    fn poll_detached(&self) {
+        if let Some(state) = self.inner.get() {
+            let raised_tasks = state
+                .running
+                .borrow()
+                .iter()
+                .filter_map(|(_, task)| task.handle.as_ref().cloned())
+                .filter(|task| task.borrow().signal.raised())
+                .collect::<Vec<_>>();
+
+            // Poll all of the signaled tasks.
+            for task in raised_tasks {
+                task.borrow_mut().poll();
+            }
+        }
     }
 
     /// Run a future on this executor.
@@ -82,12 +195,24 @@ impl<'a> Executor<'a> {
     ///
     /// Returns `true` if there was a task waiting.
     pub fn try_tick(&self) -> bool {
-        match self.state().tasks.pop() {
-            Some(runnable) => {
-                runnable.run();
-                true
+        let mut tried_detached = false;
+
+        loop {
+            // Try to pop a task from the queue.
+            if let Some(task) = self.state().tasks.pop() {
+                task.run();
+                return true;
             }
-            None => false,
+
+            // If we haven't tried to poll the detached tasks yet, do so now.
+            if !tried_detached {
+                tried_detached = true;
+                self.poll_detached();
+                continue;
+            }
+
+            // Otherwise, there are no tasks waiting.
+            return false;
         }
     }
 
@@ -124,6 +249,7 @@ impl<'a> Executor<'a> {
             Rc::new(State {
                 tasks: Queue::new(0),
                 task_pushed: Notify::new(),
+                running: RefCell::new(Slab::new()),
             })
         })
     }
@@ -139,6 +265,13 @@ impl State {
             Some(runnable) => Err(runnable),
             None => Ok(()),
         }
+    }
+}
+
+impl DetachedHandle {
+    /// Poll this `DetachedHandle`.
+    fn poll(&mut self) {
+        let _ = Pin::new(&mut self.detached).poll(&mut Context::from_waker(&self.waker));
     }
 }
 
@@ -186,6 +319,13 @@ impl<F: Future> Future for Run<'_, '_, F> {
                     runnable.run();
                 }
                 None => {
+                    // Try polling the detached tasks.
+                    this.executor.poll_detached();
+                    if let Some(task) = this.executor.state().tasks.pop() {
+                        task.run();
+                        continue;
+                    }
+
                     // No tasks left, so we need to wait for a task to be pushed.
                     this.listener
                         .set(Some(this.executor.state().task_pushed.listen()));
@@ -200,6 +340,50 @@ impl<F: Future> Future for Run<'_, '_, F> {
     }
 }
 
+struct Signal(AtomicBool);
+
+impl Signal {
+    /// Tell if the signal has been raised.
+    fn raised(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+
+    /// Create a new waker from an `Arc`.
+    fn into_waker(self: Arc<Self>) -> Waker {
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+        unsafe fn wake(this: *const ()) {
+            let this = Arc::from_raw(this as *const Signal);
+            this.0.store(true, Ordering::Release);
+        }
+
+        unsafe fn wake_by_ref(this: *const ()) {
+            let this = ManuallyDrop::new(Arc::from_raw(this as *const Signal));
+            this.0.store(true, Ordering::Release);
+        }
+
+        unsafe fn clone(this: *const ()) -> RawWaker {
+            let this = ManuallyDrop::new(Arc::from_raw(this as *const Signal));
+
+            RawWaker::new(Arc::into_raw((*this).clone()) as *const (), &VTABLE)
+        }
+
+        unsafe fn drop(this: *const ()) {
+            core::mem::drop(Arc::from_raw(this as *const Signal));
+        }
+
+        unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(self) as *const (), &VTABLE)) }
+    }
+}
+
+struct CallOnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for CallOnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,22 +391,25 @@ mod tests {
 
     #[test]
     fn test_executor() {
-        let executor = Executor::new();
-
-        // Spawn a task.
         let mut data = 11;
-        let task = executor.spawn({
-            let data = &mut data;
-            async move {
-                *data = 32;
-            }
-        });
 
-        // Run the executor.
-        block_on(executor.run(async {
-            // Wait for the task to finish.
-            task.await;
-        }));
+        {
+            let executor = Executor::new();
+
+            // Spawn a task.
+            let task = executor.spawn({
+                let data = &mut data;
+                async move {
+                    *data = 32;
+                }
+            });
+
+            // Run the executor.
+            block_on(executor.run(async {
+                // Wait for the task to finish.
+                task.await;
+            }));
+        }
 
         assert_eq!(data, 32);
     }

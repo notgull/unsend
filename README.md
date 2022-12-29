@@ -23,7 +23,7 @@ Why would you want to use `unsend`? Most `async` runtimes are thread-safe, which
 `unsend` does not provide the following:
 
 - Future, stream and I/O combinators. Consider using [`futures-lite`](https://crates.io/crates/futures-lite) or [`futures`](https://crates.io/crates/futures) instead.
-- Asynchronous I/O reactor or timers. It is best to have a single centralized I/O reactor, so you should use [`async-io`](https://crates.io/crates/async-io) instead.
+- Asynchronous I/O reactor or timers. It is best to have a single centralized I/O reactor, so you should use [`async-io`](https://crates.io/crates/async-io) or [`tokio`](https://crates.io/crates/tokio) instead.
 
 ## License
 

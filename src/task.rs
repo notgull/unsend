@@ -25,7 +25,7 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 pub unsafe fn spawn_unchecked<Fut, Sched>(
     future: Fut,
     schedule: Sched,
-) -> (Runnable, Task<Fut::Output>)
+) -> (Runnable, Task<Fut::Output, ()>)
 where
     Fut: Future,
     Sched: Fn(Runnable),
@@ -37,7 +37,8 @@ where
                 // We start with two references: the task and the runnable.
                 refcount: AtomicUsize::new(2 << REFCOUNT_SHIFT),
                 task_waker: AtomicWaker::new(),
-                vtable: &TaskInner::<Fut, Fut::Output, Sched>::TASK_VTABLE,
+                vtable: &TaskInner::<Fut, Fut::Output, Sched, ()>::TASK_VTABLE,
+                metadata: (),
                 cancelled: Cell::new(false),
                 completed: Cell::new(false),
                 scheduled: Cell::new(false),
@@ -55,6 +56,7 @@ where
     let task = Task {
         inner: Detached {
             inner: Some(inner.cast()),
+            _generic: PhantomData,
         },
         _generic: PhantomData,
     };
@@ -62,6 +64,7 @@ where
     // Create the runnable.
     let runnable = Runnable {
         inner: inner.cast(),
+        _generic: PhantomData,
     };
 
     (runnable, task)
@@ -78,19 +81,19 @@ where
 }
 
 /// The handle for a task.
-pub struct Task<T> {
+pub struct Task<T, M = ()> {
     /// The inner task.
     inner: Detached,
 
     /// The captured output.
-    _generic: PhantomData<T>,
+    _generic: PhantomData<(T, M)>,
 }
 
-impl<T> Task<T> {
+impl<T, M> Task<T, M> {
     /// Poll the task for its output.
     fn poll_task(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let inner = self.inner.inner.unwrap();
-        let header = unsafe { inner.cast::<SharedState>().as_ref() };
+        let header = unsafe { inner.cast::<SharedState<M>>().as_ref() };
 
         // If the task is cancelled and not scheduled, return `Poll::Ready(None)`.
         if header.cancelled.get() && !header.scheduled.get() {
@@ -122,7 +125,7 @@ impl<T> Task<T> {
     }
 
     /// A fallible task that returns `None` if the waker is dropped.
-    pub fn fallible(self) -> FallibleTask<T> {
+    pub fn fallible(self) -> FallibleTask<T, M> {
         FallibleTask(self)
     }
 
@@ -146,9 +149,9 @@ impl<T> Task<T> {
     }
 }
 
-impl<T> Unpin for Task<T> {}
+impl<T, M> Unpin for Task<T, M> {}
 
-impl<T> Future for Task<T> {
+impl<T, M> Future for Task<T, M> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -161,16 +164,16 @@ impl<T> Future for Task<T> {
 }
 
 /// A task that can fail.
-pub struct FallibleTask<T>(Task<T>);
+pub struct FallibleTask<T, M>(Task<T, M>);
 
-impl<T> FallibleTask<T> {
+impl<T, M> FallibleTask<T, M> {
     /// Cancel the task.
     pub async fn cancel(self) -> Option<T> {
         self.0.cancel().await
     }
 }
 
-impl<T> Future for FallibleTask<T> {
+impl<T, M> Future for FallibleTask<T, M> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -179,17 +182,20 @@ impl<T> Future for FallibleTask<T> {
 }
 
 /// A detached task.
-pub struct Detached {
+pub struct Detached<M = ()> {
     /// The inner task.
     inner: Option<NonNull<()>>,
+
+    /// Capture the generic type.
+    _generic: PhantomData<M>,
 }
 
-impl Detached {
+impl<M> Detached<M> {
     /// Cancel the task and return the inner task pointer.
     fn set_cancelled(&mut self) {
         if let Some(inner) = self.inner {
             // Cancel the task.
-            let header = unsafe { inner.cast::<SharedState>().as_ref() };
+            let header = unsafe { inner.cast::<SharedState<M>>().as_ref() };
             if header.cancelled.replace(true) {
                 return;
             }
@@ -204,17 +210,17 @@ impl Detached {
     }
 }
 
-impl Unpin for Detached {}
+impl<M> Unpin for Detached<M> {}
 
-impl Future for Detached {
+impl<M> Future for Detached<M> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = self.inner.unwrap();
-        let header = unsafe { inner.cast::<SharedState>().as_ref() };
+        let header = unsafe { inner.cast::<SharedState<M>>().as_ref() };
 
-        // If the task is cancelled and not scheduled, return `Poll::Ready(None)`.
-        if header.cancelled.get() && !header.scheduled.get() {
+        // If the task is cancelled and not scheduled, return `Poll::Ready`.
+        if (header.cancelled.get() && !header.scheduled.get()) || header.completed.get() {
             return Poll::Ready(());
         }
 
@@ -233,30 +239,35 @@ impl Future for Detached {
     }
 }
 
-impl Drop for Detached {
+impl<M> Drop for Detached<M> {
     fn drop(&mut self) {
         self.set_cancelled();
 
         if let Some(inner) = self.inner.take() {
             // Cancel and drop the task.
-            unsafe { (inner.cast::<SharedState>().as_ref().vtable.drop_ref)(inner.as_ptr() as _) };
+            unsafe {
+                (inner.cast::<SharedState<M>>().as_ref().vtable.drop_ref)(inner.as_ptr() as _)
+            };
         }
     }
 }
 
 /// The runnable for a task.
-pub struct Runnable {
+pub struct Runnable<M = ()> {
     /// The inner runnable.
     inner: NonNull<()>,
+
+    /// Capture the generic type.
+    _generic: PhantomData<M>,
 }
 
-impl Runnable {
+impl<M> Runnable<M> {
     /// Run the task and drop it after.
     ///
     /// Returns `true` if the task's waker was called during running, meaning that the task is immediately
     /// ready to run again.
     pub fn run(self) -> bool {
-        let header = unsafe { self.inner.cast::<SharedState>().as_ref() };
+        let header = unsafe { self.inner.cast::<SharedState<M>>().as_ref() };
 
         // Run the task.
         header.scheduled.set(false);
@@ -274,7 +285,7 @@ impl Runnable {
 
     /// Schedule the task to run.
     pub fn schedule(self) {
-        let header = unsafe { self.inner.cast::<SharedState>().as_ref() };
+        let header = unsafe { self.inner.cast::<SharedState<M>>().as_ref() };
 
         // Schedule the task.
         unsafe { (header.vtable.schedule)(self.inner) };
@@ -287,17 +298,18 @@ impl Runnable {
     /// Create a waker that can be used to schedule the task.
     pub fn waker(&self) -> Waker {
         unsafe {
-            let raw =
-                (self.inner.cast::<SharedState>().as_ref().vtable.waker)(self.inner.as_ptr() as _);
+            let raw = (self.inner.cast::<SharedState<M>>().as_ref().vtable.waker)(
+                self.inner.as_ptr() as _,
+            );
             Waker::from_raw(raw)
         }
     }
 }
 
-impl Drop for Runnable {
+impl<M> Drop for Runnable<M> {
     fn drop(&mut self) {
         // Cancel and drop the task.
-        let header = unsafe { self.inner.cast::<SharedState>().as_ref() };
+        let header = unsafe { self.inner.cast::<SharedState<M>>().as_ref() };
 
         header.cancelled.set(true);
         unsafe { (header.vtable.drop_ref)(self.inner.as_ptr() as _) };
@@ -305,18 +317,18 @@ impl Drop for Runnable {
 }
 
 #[repr(C)]
-struct TaskInner<Fut, Out, Sched> {
+struct TaskInner<Fut, Out, Sched, M> {
     /// The state shared between the task and its wakers.
     ///
     /// This must come first so that a pointer cast can access it.
-    shared: SharedState,
+    shared: SharedState<M>,
 
     /// The data for the task.
     data: TaskData<Fut, Out, Sched>,
 }
 
 /// Shared state for a task.
-struct SharedState {
+struct SharedState<M> {
     /// The current reference count.
     ///
     /// The refcount is actually shifted over by two. If the task needs to be rescheduled,
@@ -340,6 +352,10 @@ struct SharedState {
 
     /// Whether or not the task was previously completed.
     completed: Cell<bool>,
+
+    /// Metadata for the task.
+    #[allow(unused)]
+    metadata: M,
 }
 
 /// The data for a task.
@@ -354,13 +370,13 @@ struct TaskData<Fut, Out, Sched> {
 const REFCOUNT_SHIFT: usize = 1;
 const NEEDS_SCHEDULE: usize = 1;
 
-unsafe impl<Fut, Out, Sched> Send for TaskInner<Fut, Out, Sched> {}
-unsafe impl<Fut, Out, Sched> Sync for TaskInner<Fut, Out, Sched> {}
+unsafe impl<Fut, Out, Sched, M> Send for TaskInner<Fut, Out, Sched, M> {}
+unsafe impl<Fut, Out, Sched, M> Sync for TaskInner<Fut, Out, Sched, M> {}
 
-impl<Fut, Sched> TaskInner<Fut, Fut::Output, Sched>
+impl<Fut, Sched, M> TaskInner<Fut, Fut::Output, Sched, M>
 where
     Fut: Future,
-    Sched: Fn(Runnable),
+    Sched: Fn(Runnable<M>),
 {
 }
 
@@ -390,10 +406,10 @@ struct Vtable {
     drop_ref: unsafe fn(*const ()),
 }
 
-impl<Fut, Sched> TaskInner<Fut, Fut::Output, Sched>
+impl<Fut, Sched, M> TaskInner<Fut, Fut::Output, Sched, M>
 where
     Fut: Future,
-    Sched: Fn(Runnable),
+    Sched: Fn(Runnable<M>),
 {
     const RAW_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
         Self::waker,
@@ -461,7 +477,10 @@ where
         if increment {
             Self::increment_ref(this);
         }
-        (task.data.schedule)(Runnable { inner: this });
+        (task.data.schedule)(Runnable {
+            inner: this,
+            _generic: PhantomData,
+        });
     }
 
     /// Read the inner value out of the task.
@@ -505,7 +524,7 @@ where
     }
 
     unsafe fn increment_ref(this: NonNull<()>) {
-        let header = this.cast::<SharedState>().as_ref();
+        let header = this.cast::<SharedState<M>>().as_ref();
 
         // Abort on potential overflow.
         let new_count = header.refcount.fetch_add(REFCOUNT_SHIFT, Ordering::Relaxed);
@@ -516,7 +535,7 @@ where
 
     /// Decrement the reference count on the task.
     unsafe fn decrement_ref(this: *const ()) {
-        let header = &*(this as *const SharedState);
+        let header = &*(this as *const SharedState<M>);
         let new_count = header.refcount.fetch_sub(REFCOUNT_SHIFT, Ordering::Release);
 
         if new_count < REFCOUNT_SHIFT {
