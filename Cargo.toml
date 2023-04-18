@@ -7,3 +7,6 @@ edition = "2021"
 default = ["std"]
 std = ["alloc"]
 alloc = []
+
+[dev-dependencies]
+futures-lite = "1.13.0"

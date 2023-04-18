@@ -29,16 +29,14 @@ impl<T> Event<T> {
     #[cfg(feature = "alloc")]
     #[cold]
     pub fn listen(&self) -> Pin<alloc::boxed::Box<EventListener<'_, T>>> {
-        let mut listener = alloc::boxed::Box::pin(EventListener::new(self));
-        listener.as_mut().insert();
-        listener
+        alloc::boxed::Box::pin(EventListener::new(self))
     }
 
     /// Notify this event.
     #[inline]
     pub fn notify(&self, notify: impl IntoNotification<Tag = T>) -> usize {
         let notify = notify.into_notification();
-        let is_additional = notify.additional();
+        let is_additional = notify.is_additional();
         let mut inner = self.0.borrow_mut();
 
         if is_additional {
@@ -90,7 +88,7 @@ impl<'a, T> EventListener<'a, T> {
 
     /// Insert this listener into the linked list.
     #[cold]
-    pub fn insert(self: Pin<&mut Self>) {
+    fn insert(self: Pin<&mut Self>) {
         let mut inner = self.event.0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
@@ -115,7 +113,7 @@ impl<'a, T> EventListener<'a, T> {
 
         // Increment the number of entries.
         inner.len += 1;
-        
+
         unsafe {
             self.get_unchecked_mut().in_list = true;
         }
@@ -177,7 +175,7 @@ impl<'a, T> EventListener<'a, T> {
                 if propagate {
                     inner.notify(SingleNotify {
                         additional,
-                        tag: Some(tag)
+                        tag: Some(tag),
                     });
 
                     None
@@ -192,7 +190,7 @@ impl<'a, T> EventListener<'a, T> {
 
     /// Registers this entry into the linked list.
     fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
-        let mut _inner = self.event.0.borrow_mut();
+        let inner = self.event.0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
         let entry = unsafe { &*self.entry.get() };
@@ -206,6 +204,7 @@ impl<'a, T> EventListener<'a, T> {
             State::Notified(tag, additional) => {
                 // We have been notified, remove the listener.
                 entry.state.set(State::Notified(tag, additional));
+                drop(inner);
                 let tag = self.remove(false).unwrap();
                 RegisterResult::Notified(tag)
             }
@@ -235,11 +234,25 @@ impl<'a, T> EventListener<'a, T> {
 impl<T> Future for EventListener<'_, T> {
     type Output = T;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.in_list {
+            self.as_mut().insert();
+        }
+
         match self.register(cx.waker()) {
             RegisterResult::NotInserted => panic!("listener not inserted"),
             RegisterResult::Notified(tag) => Poll::Ready(tag),
             RegisterResult::Registered => Poll::Pending,
+        }
+    }
+}
+
+impl<T> Drop for EventListener<'_, T> {
+    fn drop(&mut self) {
+        if self.in_list {
+            unsafe {
+                Pin::new_unchecked(self).remove(true);
+            }
         }
     }
 }
@@ -258,22 +271,63 @@ impl<T> NotificationSealed for SingleNotify<T> {
         1
     }
 
-    fn additional(&self) -> bool {
+    fn is_additional(&self) -> bool {
         self.additional
     }
 
-    fn tag(&mut self) -> Self::Tag {
+    fn next_tag(&mut self) -> Self::Tag {
         self.tag.take().unwrap()
     }
 }
 
 impl<T> Notification for SingleNotify<T> {}
 
-pub trait IntoNotification {
+pub trait IntoNotification: Sized {
     type Tag;
     type Notify: Notification<Tag = Self::Tag>;
 
     fn into_notification(self) -> Self::Notify;
+    fn additional(self) -> Additional<Self::Notify> {
+        Additional(self.into_notification())
+    }
+    fn tag<T: Clone>(self, tag: T) -> Tag<Self::Notify, T> {
+        Tag {
+            inner: self.into_notification(),
+            tag,
+        }
+    }
+    fn tag_with<F, T>(self, f: F) -> TagWith<Self::Notify, F>
+    where
+        F: FnMut() -> T,
+    {
+        TagWith {
+            inner: self.into_notification(),
+            tag_fn: f,
+        }
+    }
+}
+
+macro_rules! notify_int {
+    ($($ty:ty)*) => {$(
+        impl IntoNotification for $ty {
+            type Tag = ();
+            type Notify = Notify;
+
+            #[allow(unused_comparisons)]
+            fn into_notification(self) -> Self::Notify {
+                if self < 0 {
+                    panic!("negative notification count");
+                }
+
+                Notify(self as usize)
+            }
+        }
+    )*};
+}
+
+notify_int! {
+    u8 u16 u32 u64 u128 usize
+    i8 i16 i32 i64 i128 isize
 }
 
 impl<N: Notification> IntoNotification for N {
@@ -305,7 +359,7 @@ struct Inner<T> {
 impl<T> Inner<T> {
     #[cold]
     fn notify(&mut self, mut notify: impl Notification<Tag = T>) -> usize {
-        let is_additional = notify.additional();
+        let is_additional = notify.is_additional();
         let mut count = notify.count();
 
         if !is_additional {
@@ -333,7 +387,7 @@ impl<T> Inner<T> {
                     // Set state to `Notified` and notify.
                     if let State::Waiting(wake) = entry
                         .state
-                        .replace(State::Notified(notify.tag(), is_additional))
+                        .replace(State::Notified(notify.next_tag(), is_additional))
                     {
                         wake.wake();
                     }
@@ -372,7 +426,7 @@ enum State<T> {
 enum RegisterResult<T> {
     NotInserted,
     Registered,
-    Notified(T)
+    Notified(T),
 }
 
 #[doc(hidden)]
@@ -381,7 +435,7 @@ pub struct Notify(usize);
 impl NotificationSealed for Notify {
     type Tag = ();
 
-    fn additional(&self) -> bool {
+    fn is_additional(&self) -> bool {
         false
     }
 
@@ -389,8 +443,7 @@ impl NotificationSealed for Notify {
         self.0
     }
 
-    fn tag(&mut self) -> Self::Tag {
-    }
+    fn next_tag(&mut self) -> Self::Tag {}
 }
 impl Notification for Notify {}
 
@@ -401,7 +454,7 @@ pub struct Additional<N>(N);
 impl<N: Notification> NotificationSealed for Additional<N> {
     type Tag = N::Tag;
 
-    fn additional(&self) -> bool {
+    fn is_additional(&self) -> bool {
         true
     }
 
@@ -409,8 +462,8 @@ impl<N: Notification> NotificationSealed for Additional<N> {
         self.0.count()
     }
 
-    fn tag(&mut self) -> Self::Tag {
-        self.0.tag()
+    fn next_tag(&mut self) -> Self::Tag {
+        self.0.next_tag()
     }
 }
 impl<N: Notification> Notification for Additional<N> {}
@@ -425,15 +478,15 @@ pub struct Tag<N, T> {
 impl<N: Notification, T: Clone> NotificationSealed for Tag<N, T> {
     type Tag = T;
 
-    fn additional(&self) -> bool {
-        self.inner.additional()
+    fn is_additional(&self) -> bool {
+        self.inner.is_additional()
     }
 
     fn count(&self) -> usize {
         self.inner.count()
     }
 
-    fn tag(&mut self) -> Self::Tag {
+    fn next_tag(&mut self) -> Self::Tag {
         self.tag.clone()
     }
 }
@@ -449,15 +502,15 @@ pub struct TagWith<N, F> {
 impl<N: Notification, F: FnMut() -> T, T: Clone> NotificationSealed for TagWith<N, F> {
     type Tag = T;
 
-    fn additional(&self) -> bool {
-        self.inner.additional()
+    fn is_additional(&self) -> bool {
+        self.inner.is_additional()
     }
 
     fn count(&self) -> usize {
         self.inner.count()
     }
 
-    fn tag(&mut self) -> Self::Tag {
+    fn next_tag(&mut self) -> Self::Tag {
         (self.tag_fn)()
     }
 }
@@ -469,7 +522,213 @@ mod __private {
         type Tag;
 
         fn count(&self) -> usize;
-        fn additional(&self) -> bool;
-        fn tag(&mut self) -> Self::Tag;
+        fn is_additional(&self) -> bool;
+        fn next_tag(&mut self) -> Self::Tag;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::future;
+
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Wake, Waker};
+
+    fn is_notified(listener: Pin<&mut EventListener<'_, ()>>) -> bool {
+        future::block_on(future::poll_once(listener)).is_some()
+    }
+
+    struct ListWaker {
+        notified: Arc<Mutex<Vec<usize>>>,
+        index: usize,
+    }
+
+    impl Wake for ListWaker {
+        fn wake(self: Arc<Self>) {
+            self.notified.lock().unwrap().push(self.index);
+        }
+    }
+
+    #[test]
+    fn notify() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+
+        event.notify(2);
+        event.notify(1);
+
+        assert!(is_notified(l1.as_mut()));
+        assert!(is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+    }
+
+    #[test]
+    fn notify_additional() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+
+        event.notify(1.additional());
+        event.notify(1);
+        event.notify(1.additional());
+
+        assert!(is_notified(l1.as_mut()));
+        assert!(is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+    }
+
+    #[test]
+    fn notify_one() {
+        let event = Event::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+
+        event.notify(1);
+        assert!(is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+
+        event.notify(1);
+        assert!(is_notified(l2.as_mut()));
+    }
+
+    #[test]
+    fn notify_all() {
+        let event = Event::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+
+        event.notify(core::usize::MAX);
+        assert!(is_notified(l1.as_mut()));
+        assert!(is_notified(l2.as_mut()));
+    }
+
+    #[test]
+    fn drop_notified() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+
+        event.notify(1);
+        drop(l1);
+
+        assert!(is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+    }
+
+    #[test]
+    fn drop_notified2() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+
+        event.notify(2);
+        drop(l1);
+
+        assert!(is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+    }
+
+    #[test]
+    fn drop_notified_additional() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+        let mut l4 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+        assert!(!is_notified(l4.as_mut()));
+
+        event.notify(1.additional());
+        event.notify(2);
+
+        drop(l1);
+
+        assert!(is_notified(l2.as_mut()));
+        assert!(is_notified(l3.as_mut()));
+        assert!(!is_notified(l4.as_mut()));
+    }
+
+    #[test]
+    fn drop_non_notified() {
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+        assert!(!is_notified(l3.as_mut()));
+
+        event.notify(1);
+        drop(l3);
+        assert!(is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+    }
+
+    #[test]
+    fn notify_all_fair() {
+        let event = Event::<()>::new();
+        let v = Arc::new(Mutex::new(vec![]));
+
+        let waker1 = Waker::from(Arc::new(ListWaker {
+            notified: v.clone(),
+            index: 1,
+        }));
+        let waker2 = Arc::new(ListWaker {
+            notified: v.clone(),
+            index: 2,
+        });
+        let waker3 = Arc::new(ListWaker {
+            notified: v.clone(),
+            index: 3,
+        });
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+        let mut l3 = event.listen();
+
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker1))
+            .is_pending());
     }
 }
