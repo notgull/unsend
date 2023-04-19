@@ -5,6 +5,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
+pub mod channel;
 pub mod lock;
 
 mod event;

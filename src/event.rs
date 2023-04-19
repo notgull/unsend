@@ -499,7 +499,7 @@ pub struct TagWith<N, F> {
     tag_fn: F,
 }
 
-impl<N: Notification, F: FnMut() -> T, T: Clone> NotificationSealed for TagWith<N, F> {
+impl<N: Notification, F: FnMut() -> T, T> NotificationSealed for TagWith<N, F> {
     type Tag = T;
 
     fn is_additional(&self) -> bool {
@@ -514,7 +514,7 @@ impl<N: Notification, F: FnMut() -> T, T: Clone> NotificationSealed for TagWith<
         (self.tag_fn)()
     }
 }
-impl<N: Notification, F: FnMut() -> T, T: Clone> Notification for TagWith<N, F> {}
+impl<N: Notification, F: FnMut() -> T, T> Notification for TagWith<N, F> {}
 
 mod __private {
     #[doc(hidden)]
