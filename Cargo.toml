@@ -1,6 +1,6 @@
 [package]
 name = "unsend"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 
 [features]
@@ -10,6 +10,3 @@ alloc = []
 
 [dev-dependencies]
 futures-lite = "1.13.0"
-
-[dependencies]
-async-task = { version = "4.4.0", default-features = false }
