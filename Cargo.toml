@@ -2,6 +2,12 @@
 name = "unsend"
 version = "0.0.1"
 edition = "2021"
+authors = ["John Nunley <jtnunley01@gmail.com>"]
+description = "A thread unsafe runtime for thread unsafe people"
+license = "LGPL-3.0-or-later OR MPL-2.0"
+repository = "https://github.com/notgull/unsend"
+keywords = ["async", "runtime"]
+categories = ["asynchronous"]
 
 [features]
 default = ["std"]
