@@ -10,3 +10,6 @@ alloc = []
 
 [dev-dependencies]
 futures-lite = "1.13.0"
+
+[dependencies]
+async-task = { version = "4.4.0", default-features = false }
