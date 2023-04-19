@@ -713,14 +713,14 @@ mod tests {
             notified: v.clone(),
             index: 1,
         }));
-        let waker2 = Arc::new(ListWaker {
+        let waker2 = Waker::from(Arc::new(ListWaker {
             notified: v.clone(),
             index: 2,
-        });
-        let waker3 = Arc::new(ListWaker {
+        }));
+        let waker3 = Waker::from(Arc::new(ListWaker {
             notified: v.clone(),
             index: 3,
-        });
+        }));
 
         let mut l1 = event.listen();
         let mut l2 = event.listen();
@@ -730,5 +730,29 @@ mod tests {
             .as_mut()
             .poll(&mut Context::from_waker(&waker1))
             .is_pending());
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker2))
+            .is_pending());
+        assert!(l3
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker3))
+            .is_pending());
+
+        event.notify(core::usize::MAX);
+        assert_eq!(&*v.lock().unwrap(), &[1, 2, 3]);
+
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker1))
+            .is_ready());
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker2))
+            .is_ready());
+        assert!(l3
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker3))
+            .is_ready());
     }
 }
