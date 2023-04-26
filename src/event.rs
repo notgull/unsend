@@ -271,9 +271,9 @@ impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
     }
 
     /// Registers this entry into the linked list.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// We must be inserted into the linked list.
     unsafe fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
         let inner = self.event.borrow().0.borrow_mut();

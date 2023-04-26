@@ -27,6 +27,7 @@ use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 
 use core::cell::{Cell, RefCell};
+use core::fmt;
 use core::pin::Pin;
 
 struct Channel<T> {
@@ -186,15 +187,51 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+/// The channel has been closed.
 #[derive(Debug)]
 pub struct ChannelClosed {
     _private: (),
 }
 
+impl fmt::Display for ChannelClosed {
+    #[cfg_attr(coverage, no_coverage)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "channel closed")
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ChannelClosed {}
+
+/// The `try_recv` operation failed.
 #[derive(Debug)]
 pub enum TryRecvError {
+    /// The channel has been closed.
     Closed,
+
+    /// The channel is empty.
     Empty,
+}
+
+impl fmt::Display for TryRecvError {
+    #[cfg_attr(coverage, no_coverage)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TryRecvError::Closed => write!(f, "channel closed"),
+            TryRecvError::Empty => write!(f, "channel empty"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for TryRecvError {
+    #[cfg_attr(coverage, no_coverage)]
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        match self {
+            TryRecvError::Closed => Some(&ChannelClosed { _private: () }),
+            TryRecvError::Empty => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -212,7 +249,7 @@ mod tests {
             sender.send(3).unwrap();
 
             assert_eq!(receiver.try_recv().unwrap(), 1);
-            assert_eq!(receiver.try_recv().unwrap(), 2);
+            assert_eq!(receiver.recv().await.unwrap(), 2);
             assert_eq!(receiver.try_recv().unwrap(), 3);
             assert!(receiver.try_recv().is_err());
 
@@ -240,6 +277,72 @@ mod tests {
             drop(sender2);
 
             assert!(receiver.recv().await.is_err());
+        });
+    }
+
+    #[test]
+    fn test_channel_recv_clone() {
+        future::block_on(async {
+            let (sender, receiver) = channel();
+
+            let receiver2 = receiver.clone();
+
+            sender.send(1).unwrap();
+            sender.send(2).unwrap();
+
+            assert_eq!(receiver.try_recv().unwrap(), 1);
+            assert_eq!(receiver2.try_recv().unwrap(), 2);
+            assert!(receiver.try_recv().is_err());
+            assert!(receiver2.try_recv().is_err());
+
+            drop((receiver, receiver2));
+
+            assert!(sender.send(3).is_err());
+        });
+    }
+
+    #[test]
+    fn test_send_direct() {
+        future::block_on(async {
+            let (sender, receiver) = channel();
+
+            // Start receiving.
+            let recv = receiver.recv();
+            futures_lite::pin!(recv);
+
+            // Poll once.
+            assert!(future::poll_once(&mut recv).await.is_none());
+
+            // Send an item.
+            sender.send(1).unwrap();
+
+            // Poll again.
+            assert_eq!(future::poll_once(&mut recv).await.unwrap().ok(), Some(1));
+        });
+    }
+
+    #[test]
+    fn test_recv_and_drop() {
+        future::block_on(async {
+            let (sender, receiver) = channel::<i32>();
+
+            // Start receiving.
+            let recv = receiver.recv();
+            futures_lite::pin!(recv);
+            let receiver2 = receiver.clone();
+            let recv2 = receiver2.recv();
+            futures_lite::pin!(recv2);
+
+            // Poll once.
+            assert!(future::poll_once(&mut recv).await.is_none());
+            assert!(future::poll_once(&mut recv2).await.is_none());
+
+            // Drop the sender.
+            drop(sender);
+
+            // Poll again.
+            assert!(recv.await.is_err());
+            assert!(recv2.await.is_err());
         });
     }
 
