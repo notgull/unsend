@@ -18,6 +18,7 @@ executor = ["alloc", "async-task", "concurrent-queue", "atomic-waker", "slab", "
 
 [dev-dependencies]
 futures-lite = "1.13.0"
+waker-fn = "1.1.0"
 
 [dependencies]
 async-task = { version = "4.4.0", default-features = false, optional = true }

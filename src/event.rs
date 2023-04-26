@@ -271,15 +271,15 @@ impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
     }
 
     /// Registers this entry into the linked list.
-    fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
+    /// 
+    /// # Safety
+    /// 
+    /// We must be inserted into the linked list.
+    unsafe fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
         let inner = self.event.borrow().0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
         let entry = unsafe { &*self.entry.get() };
-
-        if !self.in_list {
-            return RegisterResult::NotInserted;
-        }
 
         // Take out the state and check it.
         match entry.state.replace(State::Created) {
@@ -317,8 +317,8 @@ impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
             self.as_mut().insert();
         }
 
-        match self.register(cx.waker()) {
-            RegisterResult::NotInserted => panic!("listener not inserted"),
+        // SAFETY: We are in the list.
+        match unsafe { self.register(cx.waker()) } {
             RegisterResult::Notified(tag) => Poll::Ready(tag),
             RegisterResult::Registered => Poll::Pending,
         }
@@ -502,7 +502,6 @@ enum State<T> {
 }
 
 enum RegisterResult<T> {
-    NotInserted,
     Registered,
     Notified(T),
 }
@@ -609,11 +608,16 @@ mod __private {
 mod tests {
     use super::*;
     use futures_lite::future;
+    use waker_fn::waker_fn;
 
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Wake, Waker};
 
     fn is_notified(listener: Pin<&mut EventListener<'_, ()>>) -> bool {
+        future::block_on(future::poll_once(listener)).is_some()
+    }
+
+    fn is_notified_rc(listener: Pin<&mut EventListenerRc<()>>) -> bool {
         future::block_on(future::poll_once(listener)).is_some()
     }
 
@@ -667,6 +671,82 @@ mod tests {
         assert!(is_notified(l1.as_mut()));
         assert!(is_notified(l2.as_mut()));
         assert!(!is_notified(l3.as_mut()));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn notify_rc() {
+        let event = Rc::new(Event::<()>::new());
+
+        let l1 = EventListenerRc::new(event.clone());
+        let l2 = EventListenerRc::new(event.clone());
+
+        futures_lite::pin!(l1);
+        futures_lite::pin!(l2);
+
+        assert!(!is_notified_rc(l1.as_mut()));
+        assert!(!is_notified_rc(l2.as_mut()));
+
+        event.notify(1);
+        event.notify(1);
+
+        assert!(is_notified_rc(l1.as_mut()));
+        assert!(!is_notified_rc(l2.as_mut()));
+
+        event.notify(1);
+
+        assert!(is_notified_rc(l2.as_mut()));
+    }
+
+    #[test]
+    fn notify_out_of_range() {
+        let event = Event::<()>::new();
+
+        assert_eq!(event.notify(1.additional()), 0);
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+
+        assert!(!is_notified(l1.as_mut()));
+        assert!(!is_notified(l2.as_mut()));
+
+        assert_eq!(event.notify(2), 2);
+        assert_eq!(event.notify(1), 0);
+    }
+
+    #[test]
+    fn change_waker() {
+        let v = Arc::new(Mutex::new(0));
+
+        let waker1 = waker_fn::waker_fn({
+            let v = v.clone();
+            move || *v.lock().unwrap() = 1
+        });
+        let waker2 = waker_fn::waker_fn({
+            let v = v.clone();
+            move || *v.lock().unwrap() = 2
+        });
+
+        let event = Event::<()>::new();
+
+        let mut l1 = event.listen();
+
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker1))
+            .is_pending(),);
+
+        // Change the waker.
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker2))
+            .is_pending(),);
+
+        // Notify the event.
+        event.notify(1);
+
+        // The waker should be called.
+        assert_eq!(*v.lock().unwrap(), 2);
     }
 
     #[test]
@@ -832,5 +912,116 @@ mod tests {
             .as_mut()
             .poll(&mut Context::from_waker(&waker3))
             .is_ready());
+    }
+
+    #[test]
+    fn notify_tagged() {
+        let event = Event::<i32>::new();
+
+        let waker = waker_fn(|| {});
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+
+        // Should not be notified.
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        // Notify with tags.
+        event.notify(1.tag(1));
+        event.notify(1.tag(2));
+
+        // Should be notified.
+        assert_eq!(
+            l1.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(1)
+        );
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        // Notify with tags.
+        event.notify(2.tag(13));
+
+        // Should be notified.
+        assert_eq!(
+            l2.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(13)
+        );
+    }
+
+    #[test]
+    fn notify_tagged_with() {
+        let event = Event::<i32>::new();
+
+        let waker = waker_fn(|| {});
+
+        let mut l1 = event.listen();
+        let mut l2 = event.listen();
+
+        // Should not be notified.
+        assert!(l1
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        // Notify with tags.
+        event.notify(1.tag_with(|| 1));
+        event.notify(1.tag_with(|| 2));
+
+        // Should be notified.
+        assert_eq!(
+            l1.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(1)
+        );
+        assert!(l2
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        // Notify with tags.
+        event.notify(2.tag_with(|| 13));
+
+        // Should be notified.
+        assert_eq!(
+            l2.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(13)
+        );
+    }
+
+    macro_rules! negative_test {
+        (
+            $(
+                $tname:ident => $t:ty
+            ),*
+        ) => {$(
+            #[test]
+            #[should_panic]
+            fn $tname() {
+                let event = Event::<()>::new();
+                let n: $t = -1;
+                event.notify(n);
+            }
+        )*};
+    }
+
+    negative_test! {
+        negative_test_i8 => i8,
+        negative_test_i16 => i16,
+        negative_test_i32 => i32,
+        negative_test_i64 => i64,
+        negative_test_i128 => i128,
+        negative_test_isize => isize
     }
 }
