@@ -28,7 +28,7 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::mem::{forget, ManuallyDrop};
 use core::num::NonZeroUsize;
-use core::task::Waker;
+use core::task::{Poll, Waker};
 
 use crate::sync::Arc;
 use crate::{Event, EventListenerRc, IntoNotification};
@@ -401,25 +401,44 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Ticker<'a, T> {
                 }
             }
 
-            // Try to pop from the mainstream state.
-            if self.is_mainstream {
-                if let Ok(runnable) = self.state.task_queue.pop() {
-                    // Run the runnable.
-                    runnable.run();
+            let runnable = {
+                if self.is_mainstream {
+                    // If we are the mainstream, wait in tandem.
+                    let mainstream_runnable = futures_lite::future::poll_fn(|cx| {
+                        let mut waker_set = false;
 
-                    return;
+                        loop {
+                            // Try to pop from the mainstream queue.
+                            if let Ok(runnable) = self.state.task_queue.pop() {
+                                // Remove ourselves from the mainstream queue if necessary.
+                                if waker_set {
+                                    self.state.mainstream_waker.take();
+                                }
+
+                                return Poll::Ready(Some(runnable));
+                            }
+
+                            // Register our interest in the mainstream queue.
+                            if !waker_set {
+                                self.state.mainstream_waker.register(cx.waker());
+                                waker_set = true;
+                                continue;
+                            }
+
+                            // Begin the wait.
+                            return Poll::Pending;
+                        }
+                    });
+
+                    (&mut listener).or(mainstream_runnable).await
+                } else {
+                    // Just wait on the listener.
+                    (&mut listener).await
                 }
-
-                // Register our interest in the mainstream queue.
-                futures_lite::future::poll_fn(|cx| {
-                    self.state.mainstream_waker.register(cx.waker());
-                    core::task::Poll::Ready(())
-                })
-                .await;
-            }
+            };
 
             // Wait on the thread waker, and maybe get a runnable.
-            if let Some(runnable) = (&mut listener).await {
+            if let Some(runnable) = runnable {
                 // Run the runnable.
                 runnable.run();
 

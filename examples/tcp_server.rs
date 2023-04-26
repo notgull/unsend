@@ -47,7 +47,7 @@ fn main() {
                 let mut file = Unblock::new(file);
 
                 while let Ok(msg) = rx.recv().await {
-                    let message = format!("Sent out: {}", msg);
+                    let message = format!("Sent out: {}\n", msg);
                     file.write_all(message.as_bytes()).await.unwrap();
                 }
             })
