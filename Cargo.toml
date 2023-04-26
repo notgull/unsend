@@ -8,7 +8,11 @@ license = "LGPL-3.0-or-later OR MPL-2.0"
 repository = "https://github.com/notgull/unsend"
 keywords = ["async", "runtime"]
 categories = ["asynchronous"]
-rust-version = "1.39.0"
+
+# when updating rust-version:
+# - update ci.yml
+# - update readme.md
+rust-version = "1.48.0"
 
 [features]
 default = ["std", "executor"]
