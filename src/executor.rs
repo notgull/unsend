@@ -31,7 +31,7 @@ use core::num::NonZeroUsize;
 use core::task::Waker;
 
 use crate::sync::Arc;
-use crate::{Event, IntoNotification};
+use crate::{Event, EventListenerRc, IntoNotification};
 
 use async_task::{Runnable, Task};
 use atomic_waker::AtomicWaker;
@@ -72,7 +72,7 @@ struct ThreadState {
     task_queue: VecDeque<Runnable>,
 
     /// Waker for the thread-local queue.
-    thread_waker: Event<Option<Runnable>>,
+    thread_waker: Rc<Event<Option<Runnable>>>,
 
     /// Slab of tasks that are currently running.
     active: Slab<Waker>,
@@ -121,7 +121,7 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
                 thread_id,
                 thread_state: ManuallyDrop::new(RefCell::new(ThreadState {
                     task_queue: VecDeque::new(),
-                    thread_waker: Event::new(),
+                    thread_waker: Rc::new(Event::new()),
                     active: Slab::new(),
                     is_mainstream_listening: false,
                 })),
@@ -183,45 +183,85 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
     }
 
     /// Run a task if one is scheduled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use unsend::executor::Executor;
+    ///
+    /// let executor = Executor::new();
+    /// assert!(!executor.try_tick()); // No tasks are scheduled.
+    ///
+    /// // Spawn a task.
+    /// let task = executor.spawn(async {
+    ///     println!("Hello, world!");
+    /// });
+    ///
+    /// assert!(executor.try_tick()); // The task is run.
+    /// ```
     pub fn try_tick(&self) -> bool {
-        let did_run = self.with_thread_local(|state| {
+        let mut runnable = self.with_thread_local(|state| {
             // Try to run a task from the thread-local queue.
             if let Some(runnable) = state.task_queue.pop_front() {
                 // Wake up another runner in case we take a while.
                 state.thread_waker.notify(1.tag_with(|| None));
-
-                // Run the runnable.
-                runnable.run();
-
-                return true;
+                Some(runnable)
+            } else {
+                None
             }
-
-            false
         });
 
-        if !did_run {
+        if runnable.is_none() {
             // Try the mainstream queue.
-            if let Ok(runnable) = self.state.task_queue.pop() {
+            if let Ok(r) = self.state.task_queue.pop() {
                 // Wake up the mainstream runner in case we take a while.
                 self.state.mainstream_waker.wake();
-
-                // Run the runnable.
-                runnable.run();
-
-                return true;
+                runnable = Some(r);
             }
         }
 
-        false
+        match runnable {
+            Some(runnable) => {
+                runnable.run();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Run a single tick of the executor, waiting for a task to be scheduled if necessary.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use unsend::executor::Executor;
+    /// use futures_lite::future;
+    ///
+    /// let executor = Executor::new();
+    /// let task = executor.spawn(async {
+    ///     println!("Hello, world!");
+    /// });
+    /// future::block_on(executor.tick());
+    /// ```
     pub async fn tick(&self) {
         // Create a ticker and run a single tick.
         Ticker::new(&self.state).tick().await;
     }
 
     /// Run a future against the executor.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use unsend::executor::Executor;
+    /// use futures_lite::future;
+    ///
+    /// let executor = Executor::new();
+    /// let task = executor.spawn(async { 1 + 2 });
+    /// let res = future::block_on(executor.run(async { task.await * 2 }));
+    ///
+    /// assert_eq!(res, 6);
+    /// ```
     pub async fn run<O>(&self, f: impl Future<Output = O>) -> O {
         // A future that polls the executor forever.
         let runner = async move {
@@ -275,17 +315,98 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
 struct Ticker<'a, T> {
     /// The state of the executor.
     state: &'a State<T>,
+
+    /// Are we the mainstream runner?
+    is_mainstream: bool,
+
+    /// This type is not `Send` or `Sync`.
+    _marker: PhantomData<*const ()>,
 }
 
 impl<'a, T: ThreadId + Send + Sync + 'static> Ticker<'a, T> {
     /// Create a new ticker from the state.
     fn new(state: &'a State<T>) -> Self {
-        Self { state }
+        Self {
+            state,
+            is_mainstream: false,
+            _marker: PhantomData,
+        }
     }
 
     /// Run a single tick of the executor, waiting for a task to be scheduled if necessary.
     async fn tick(&mut self) {
-        todo!()
+        // Create a listener.
+        let listener = {
+            // SAFETY: We are still on the origin thread.
+            let thread_state = self.state.thread_state.borrow_mut();
+            EventListenerRc::new(thread_state.thread_waker.clone())
+        };
+
+        futures_lite::pin!(listener);
+
+        loop {
+            // Try to pop from the thread local state.
+            {
+                // SAFETY: We are still on the origin thread.
+                let mut thread_state = self.state.thread_state.borrow_mut();
+
+                if let Some(runnable) = thread_state.task_queue.pop_front() {
+                    // Wake up another runner in case we take a while.
+                    thread_state.thread_waker.notify(1.tag_with(|| None));
+
+                    // Run the runnable.
+                    drop(thread_state);
+                    runnable.run();
+
+                    return;
+                }
+
+                // Acquire the mainstream runner if it hasn't been acquired yet.
+                if !thread_state.is_mainstream_listening {
+                    thread_state.is_mainstream_listening = true;
+                    self.is_mainstream = true;
+                }
+            }
+
+            // Try to pop from the mainstream state.
+            if self.is_mainstream {
+                if let Ok(runnable) = self.state.task_queue.pop() {
+                    // Run the runnable.
+                    runnable.run();
+
+                    return;
+                }
+
+                // Register our interest in the mainstream queue.
+                futures_lite::future::poll_fn(|cx| {
+                    self.state.mainstream_waker.register(cx.waker());
+                    core::task::Poll::Ready(())
+                })
+                .await;
+            }
+
+            // Wait on the thread waker, and maybe get a runnable.
+            if let Some(runnable) = (&mut listener).await {
+                // Run the runnable.
+                runnable.run();
+
+                return;
+            }
+        }
+    }
+}
+
+impl<'a, T> Drop for Ticker<'a, T> {
+    fn drop(&mut self) {
+        // If we are the mainstream runner, wake up another runner.
+        if self.is_mainstream {
+            let _ = self.state.mainstream_waker.take();
+
+            // SAFETY: We are still on the origin thread.
+            let mut thread_state = self.state.thread_state.borrow_mut();
+            thread_state.is_mainstream_listening = false;
+            thread_state.thread_waker.notify(1.tag_with(|| None));
+        }
     }
 }
 
