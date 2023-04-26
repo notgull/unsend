@@ -30,6 +30,9 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 use core::task::{Context, Poll, Waker};
 
+#[cfg(feature = "alloc")]
+use alloc::rc::Rc;
+
 use __private::NotificationSealed;
 
 /// Wait for an event to occur.
@@ -86,7 +89,46 @@ pin_project_lite::pin_project! {
     }
 }
 
+impl<'a, T> EventListener<'a, T> {
+    /// Create a new event listener.
+    #[inline]
+    pub const fn new(event: &'a Event<T>) -> Self {
+        Self {
+            listener: Listener::new(event),
+        }
+    }
+}
+
 impl<T> Future for EventListener<'_, T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().listener.poll(cx)
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// A listener for an event over an `Rc`.
+    #[cfg(feature = "alloc")]
+    pub struct EventListenerRc<T> {
+        #[pin]
+        listener: Listener<T, Rc<Event<T>>>,
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T> EventListenerRc<T> {
+    /// Create a new event listener.
+    #[inline]
+    pub fn new(event: Rc<Event<T>>) -> Self {
+        Self {
+            listener: Listener::new(event),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T> Future for EventListenerRc<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -107,16 +149,6 @@ struct Listener<T, B: Borrow<Event<T>> + Clone> {
 
     /// This listener should not be moved after being pinned.
     _pin: PhantomPinned,
-}
-
-impl<'a, T> EventListener<'a, T> {
-    /// Create a new event listener.
-    #[inline]
-    pub const fn new(event: &'a Event<T>) -> Self {
-        Self {
-            listener: Listener::new(event),
-        }
-    }
 }
 
 impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {

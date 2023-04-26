@@ -34,7 +34,7 @@ pub mod lock;
 
 mod event;
 
-pub use event::{Event, EventListener, IntoNotification, Notification};
+pub use event::{Event, EventListener, EventListenerRc, IntoNotification, Notification};
 
 mod sync {
     pub use alloc::sync::Arc;
