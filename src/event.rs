@@ -21,6 +21,7 @@
 
 //! Event handlers.
 
+use core::borrow::Borrow;
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::future::Future;
 use core::marker::PhantomPinned;
@@ -77,10 +78,26 @@ impl<T> Event<T> {
     }
 }
 
+pin_project_lite::pin_project! {
+    /// A listener for an event.
+    pub struct EventListener<'a, T> {
+        #[pin]
+        listener: Listener<T, &'a Event<T>>,
+    }
+}
+
+impl<T> Future for EventListener<'_, T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().listener.poll(cx)
+    }
+}
+
 /// A listener for an event.
-pub struct EventListener<'a, T> {
+struct Listener<T, B: Borrow<Event<T>> + Clone> {
     /// The event that this listener is listening to.
-    event: &'a Event<T>,
+    event: B,
 
     /// Is this listener in the linked list?
     in_list: bool,
@@ -94,7 +111,17 @@ pub struct EventListener<'a, T> {
 
 impl<'a, T> EventListener<'a, T> {
     /// Create a new event listener.
+    #[inline]
     pub const fn new(event: &'a Event<T>) -> Self {
+        Self {
+            listener: Listener::new(event),
+        }
+    }
+}
+
+impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
+    /// Create a new event listener.
+    const fn new(event: B) -> Self {
         Self {
             event,
             in_list: false,
@@ -110,7 +137,8 @@ impl<'a, T> EventListener<'a, T> {
     /// Insert this listener into the linked list.
     #[cold]
     fn insert(self: Pin<&mut Self>) {
-        let mut inner = self.event.0.borrow_mut();
+        let evt = self.event.clone();
+        let mut inner = evt.borrow().0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
         let entry = unsafe { &mut *self.entry.get() };
@@ -142,7 +170,8 @@ impl<'a, T> EventListener<'a, T> {
 
     /// Remove this listener from the linked list.
     fn remove(self: Pin<&mut Self>, propagate: bool) -> Option<T> {
-        let mut inner = self.event.0.borrow_mut();
+        let evt = self.event.clone();
+        let mut inner = evt.borrow().0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
         let entry = unsafe { &*self.entry.get() };
@@ -211,7 +240,7 @@ impl<'a, T> EventListener<'a, T> {
 
     /// Registers this entry into the linked list.
     fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
-        let inner = self.event.0.borrow_mut();
+        let inner = self.event.borrow().0.borrow_mut();
 
         // SAFETY: We've locked the inner state, so we can safely access the entry.
         let entry = unsafe { &*self.entry.get() };
@@ -250,12 +279,8 @@ impl<'a, T> EventListener<'a, T> {
             }
         }
     }
-}
 
-impl<T> Future for EventListener<'_, T> {
-    type Output = T;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         if !self.in_list {
             self.as_mut().insert();
         }
@@ -268,7 +293,7 @@ impl<T> Future for EventListener<'_, T> {
     }
 }
 
-impl<T> Drop for EventListener<'_, T> {
+impl<T, B: Borrow<Event<T>> + Clone> Drop for Listener<T, B> {
     fn drop(&mut self) {
         if self.in_list {
             unsafe {
