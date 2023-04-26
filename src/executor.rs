@@ -139,7 +139,7 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
     /// Tell if this executor is empty.
     pub fn is_empty(&self) -> bool {
         self.with_thread_local(|state| state.task_queue.is_empty())
-            || self.state.task_queue.is_empty()
+            && self.state.task_queue.is_empty()
     }
 
     /// Spawn a new future onto the executor.
@@ -276,6 +276,7 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
     }
 
     /// The scheduler function.
+    #[cfg_attr(coverage, no_coverage)]
     fn schedule(&self) -> impl Fn(Runnable) {
         let state = self.state.clone();
         move |runnable| {
@@ -421,30 +422,35 @@ pub unsafe trait ThreadId {
 }
 
 unsafe impl<T: ThreadId + ?Sized> ThreadId for &T {
+    #[cfg_attr(coverage, no_coverage)]
     fn id(&self) -> Option<NonZeroUsize> {
         (**self).id()
     }
 }
 
 unsafe impl<T: ThreadId + ?Sized> ThreadId for &mut T {
+    #[cfg_attr(coverage, no_coverage)]
     fn id(&self) -> Option<NonZeroUsize> {
         (**self).id()
     }
 }
 
 unsafe impl<T: ThreadId + ?Sized> ThreadId for alloc::boxed::Box<T> {
+    #[cfg_attr(coverage, no_coverage)]
     fn id(&self) -> Option<NonZeroUsize> {
         (**self).id()
     }
 }
 
 unsafe impl<T: ThreadId + ?Sized> ThreadId for Rc<T> {
+    #[cfg_attr(coverage, no_coverage)]
     fn id(&self) -> Option<NonZeroUsize> {
         (**self).id()
     }
 }
 
 unsafe impl<T: ThreadId + ?Sized> ThreadId for Arc<T> {
+    #[cfg_attr(coverage, no_coverage)]
     fn id(&self) -> Option<NonZeroUsize> {
         (**self).id()
     }
@@ -535,5 +541,115 @@ struct CallOnDrop<F: FnMut()>(F);
 impl<F: FnMut()> Drop for CallOnDrop<F> {
     fn drop(&mut self) {
         (self.0)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::future;
+
+    #[test]
+    fn smoke() {
+        future::block_on(async {
+            let slot = RefCell::new(0);
+            let ex = Executor::new();
+
+            let t1 = ex.spawn(async {
+                *slot.borrow_mut() += 1;
+                17
+            });
+
+            let t2 = ex.spawn(async {
+                *slot.borrow_mut() += 2;
+                18
+            });
+
+            // Wait for the tasks to finish.
+            ex.run(async {
+                assert_eq!(t1.await, 17);
+                assert_eq!(t2.await, 18);
+                assert!(ex.is_empty());
+                assert_eq!(*slot.borrow(), 3);
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn smoke_no_thread_id() {
+        future::block_on(async {
+            let slot = RefCell::new(0);
+            let ex = Executor::with_thread_id(NoThreadId::new());
+
+            let t1 = ex.spawn(async {
+                *slot.borrow_mut() += 1;
+                17
+            });
+
+            let t2 = ex.spawn(async {
+                *slot.borrow_mut() += 2;
+                18
+            });
+
+            // Wait for the tasks to finish.
+            ex.run(async {
+                assert_eq!(t1.await, 17);
+                assert_eq!(t2.await, 18);
+                assert!(ex.is_empty());
+                assert_eq!(*slot.borrow(), 3);
+            })
+            .await;
+        });
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn try_tick() {
+        use std::thread;
+
+        future::block_on(async {
+            let ex = Executor::new();
+            assert!(!ex.try_tick());
+
+            // Spawn a task that will wake up the executor.
+            let task = ex.spawn({
+                let mut polls_left = 5;
+                async move {
+                    while polls_left > 0 {
+                        future::yield_now().await;
+                        polls_left -= 1;
+                    }
+                }
+            });
+
+            ex.run(async {
+                // Poll the task once.
+                assert!(ex.try_tick());
+
+                // Poll again.
+                assert!(ex.try_tick());
+
+                // Send to another thread and poll until we're done.
+                thread::spawn(move || {
+                    future::block_on(task);
+                });
+
+                // Poll until we're done.
+                assert!(ex.try_tick());
+
+                ex.tick().await;
+
+                while !ex.is_empty() {
+                    ex.tick().await;
+                }
+            })
+            .await;
+        })
+    }
+
+    #[test]
+    fn default_smoke() {
+        let _: Executor<'_, NoThreadId> = Executor::default();
     }
 }
