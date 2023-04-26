@@ -107,9 +107,9 @@ impl<T> Future for EventListener<'_, T> {
     }
 }
 
+#[cfg(feature = "alloc")]
 pin_project_lite::pin_project! {
     /// A listener for an event over an `Rc`.
-    #[cfg(feature = "alloc")]
     pub struct EventListenerRc<T> {
         #[pin]
         listener: Listener<T, Rc<Event<T>>>,
@@ -604,7 +604,7 @@ mod __private {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use futures_lite::future;

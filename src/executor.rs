@@ -47,6 +47,38 @@ pub struct Executor<'a, T = DefaultThreadId> {
     _marker: PhantomData<&'a Cell<Rc<()>>>,
 }
 
+impl<T> Drop for Executor<'_, T> {
+    fn drop(&mut self) {
+        // Wake all tasks.
+        loop {
+            let mut thread_state = self.state.thread_state.borrow_mut();
+            let waker = match thread_state.active.drain().next() {
+                Some(waker) => waker,
+                None => break,
+            };
+
+            drop(thread_state);
+            waker.wake();
+        }
+
+        // Drain the queues.
+        while self.state.task_queue.pop().is_ok()
+            && self
+                .state
+                .thread_state
+                .borrow_mut()
+                .task_queue
+                .pop_front()
+                .is_some()
+        {}
+
+        // Destroy the thread state.
+        unsafe {
+            ManuallyDrop::drop(&mut self.state.thread_state.borrow_mut());
+        }
+    }
+}
+
 struct State<T> {
     /// Mainstream queue of tasks.
     task_queue: ConcurrentQueue<Runnable>,
@@ -61,7 +93,7 @@ struct State<T> {
     origin_thread: Option<NonZeroUsize>,
 
     /// State that can only be accessed by the thread that owns the executor.
-    thread_state: ManuallyDrop<RefCell<ThreadState>>,
+    thread_state: RefCell<ManuallyDrop<ThreadState>>,
 }
 
 unsafe impl<T: Send + Sync> Send for State<T> {}
@@ -119,7 +151,7 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Executor<'a, T> {
                 mainstream_waker: AtomicWaker::new(),
                 origin_thread: thread_id.id(),
                 thread_id,
-                thread_state: ManuallyDrop::new(RefCell::new(ThreadState {
+                thread_state: RefCell::new(ManuallyDrop::new(ThreadState {
                     task_queue: VecDeque::new(),
                     thread_waker: Rc::new(Event::new()),
                     active: Slab::new(),

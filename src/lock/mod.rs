@@ -322,6 +322,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn barrier_smoke() {
         future::block_on(async {
@@ -338,7 +339,7 @@ mod tests {
             assert!(result.clone().is_leader());
 
             // Eat coverage for debug.
-            format!("{:?}", result);
+            alloc::format!("{:?}", result);
 
             // The other tasks should now be unblocked.
             let result = future::poll_once(wait1.as_mut()).await.unwrap();

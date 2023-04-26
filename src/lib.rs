@@ -35,9 +35,13 @@ pub mod lock;
 
 mod event;
 
-pub use event::{Event, EventListener, EventListenerRc, IntoNotification, Notification};
+pub use event::{Event, EventListener, IntoNotification, Notification};
+
+#[cfg(feature = "alloc")]
+pub use event::EventListenerRc;
 
 mod sync {
+    #[cfg(feature = "alloc")]
     pub use alloc::sync::Arc;
     pub use core::sync::atomic;
 }
