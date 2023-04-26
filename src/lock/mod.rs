@@ -313,4 +313,36 @@ mod tests {
             assert!(future::poll_once(&mut waiter).await.is_some());
         });
     }
+
+    #[test]
+    fn once_cell_set2() {
+        future::block_on(async {
+            let cell = OnceCell::<i32>::from(3);
+            assert_eq!(cell.set(5).await, Err(5));
+        });
+    }
+
+    #[test]
+    fn barrier_smoke() {
+        future::block_on(async {
+            let barrier = Barrier::new(2);
+
+            // Start two tasks that wait on the barrier.
+            let wait1 = barrier.wait();
+            futures_lite::pin!(wait1);
+
+            assert!(future::poll_once(wait1.as_mut()).await.is_none());
+
+            // Wait on the barrier in the current task.
+            let result = barrier.wait().await;
+            assert!(result.clone().is_leader());
+
+            // Eat coverage for debug.
+            format!("{:?}", result);
+
+            // The other tasks should now be unblocked.
+            let result = future::poll_once(wait1.as_mut()).await.unwrap();
+            assert!(!result.is_leader());
+        });
+    }
 }
