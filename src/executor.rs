@@ -442,6 +442,12 @@ impl<'a, T: ThreadId + Send + Sync + 'static> Ticker<'a, T> {
                 // Run the runnable.
                 runnable.run();
 
+                // Poll the listener to see if there are more runnables.
+                if let Some(Some(runnable)) = futures_lite::future::poll_once(listener).await {
+                    // Run the runnable.
+                    runnable.run();
+                }
+
                 return;
             }
         }
