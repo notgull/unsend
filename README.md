@@ -57,7 +57,75 @@ The Minimum Supported Rust Version (MSRV) of this crate is **1.48**. As a **tent
 
 ## Examples
 
-TODO
+A basic TCP server using `unsend`, `blocking` and `async-io`.
+
+```rust
+use async_io::Async;
+use blocking::{unblock, Unblock};
+use futures_lite::prelude::*;
+
+use std::cell::Cell;
+use std::fs::File;
+use std::net::TcpListener;
+
+use unsend::channel::channel;
+use unsend::executor::Executor;
+
+let (tx, rx) = channel();
+
+// A shared value that will be mutated by the tasks.
+let shared = Cell::new(1);
+
+// Spawn a task that will read from the channel and write to a log file.
+let executor = Executor::new();
+executor
+    .spawn(async move {
+        let file = unblock(|| File::create("log.txt")).await.unwrap();
+        let mut file = Unblock::new(file);
+
+        while let Ok(msg) = rx.recv().await {
+            let message = format!("Sent out: {}", msg);
+            file.write_all(message.as_bytes()).await.unwrap();
+        }
+    })
+    .detach();
+
+executor
+    .run(async {
+        loop {
+            // Listen for incoming connections.
+            let listener = Async::<TcpListener>::bind(([0, 0, 0, 0], 3000)).unwrap();
+
+            // Accept a new connection.
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Spawn a task that will operate on the stream.
+            let tx = tx.clone();
+            let shared = &shared;
+            executor
+                .spawn(async move {
+                    // Read a 4-byte big-endian integer from the stream.
+                    let mut buf = [0; 4];
+                    stream.read_exact(&mut buf).await.unwrap();
+                    let value = u32::from_be_bytes(buf);
+
+                    // Multiply it by the shared value.
+                    let value = value * shared.get();
+
+                    // Increment the shared value.
+                    shared.set(shared.get() + 1);
+
+                    // Write the value to the stream.
+                    stream.write_all(&value.to_be_bytes()).await.unwrap();
+
+                    // Send the value to be logged.
+                    tx.send(value).unwrap();
+                })
+                .detach();
+        }
+    })
+    .await;
+```
 
 ## License
 
