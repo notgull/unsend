@@ -28,8 +28,15 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 pub mod channel;
+#[cfg(feature = "alloc")]
+pub mod executor;
 pub mod lock;
 
 mod event;
 
 pub use event::{Event, EventListener, IntoNotification, Notification};
+
+mod sync {
+    pub use alloc::sync::Arc;
+    pub use core::sync::atomic;
+}
