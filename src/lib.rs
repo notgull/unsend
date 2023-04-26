@@ -28,7 +28,7 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 pub mod channel;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "executor")]
 pub mod executor;
 pub mod lock;
 

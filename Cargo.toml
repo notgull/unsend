@@ -11,9 +11,10 @@ categories = ["asynchronous"]
 rust-version = "1.39.0"
 
 [features]
-default = ["std"]
+default = ["std", "executor"]
 std = ["alloc"]
-alloc = ["async-task", "concurrent-queue", "atomic-waker", "slab", "futures-lite"]
+alloc = []
+executor = ["alloc", "async-task", "concurrent-queue", "atomic-waker", "slab", "futures-lite"]
 
 [dev-dependencies]
 futures-lite = "1.13.0"
