@@ -52,6 +52,7 @@ impl<T> Event<T> {
 
     /// Create a new listener for this event.
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     #[cold]
     pub fn listen(&self) -> Pin<alloc::boxed::Box<EventListener<'_, T>>> {
         alloc::boxed::Box::pin(EventListener::new(self))
@@ -110,6 +111,7 @@ impl<T> Future for EventListener<'_, T> {
 #[cfg(feature = "alloc")]
 pin_project_lite::pin_project! {
     /// A listener for an event over an `Rc`.
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub struct EventListenerRc<T> {
         #[pin]
         listener: Listener<T, Rc<Event<T>>>,

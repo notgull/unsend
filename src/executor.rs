@@ -515,6 +515,7 @@ unsafe impl<T: ThreadId + ?Sized> ThreadId for Arc<T> {
 
 /// Get the current thread ID using the standard library.
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct StdThreadId {
     _private: (),

@@ -46,6 +46,7 @@ pub struct SemaphoreGuard<'a> {
 
 /// A guard that releases the permit when dropped.
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub struct SemaphoreGuardRc {
     /// The origin semaphore.
     semaphore: Rc<Semaphore>,
@@ -73,6 +74,7 @@ impl Semaphore {
 
     /// Try to acquire a permit through an `Rc`.
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn try_acquire_rc(self: Rc<Self>) -> Option<SemaphoreGuardRc> {
         let permits = self.permits.get();
         if permits > 0 {
@@ -102,6 +104,7 @@ impl Semaphore {
 
     /// Acquire a permit through an `Rc`.
     #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub async fn acquire_rc(self: Rc<Self>) -> SemaphoreGuardRc {
         let mut listener = EventListener::new(&self.event);
 

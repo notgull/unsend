@@ -1,6 +1,6 @@
 [package]
 name = "unsend"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2018"
 authors = ["John Nunley <jtnunley01@gmail.com>"]
 description = "A thread unsafe runtime for thread unsafe people"
@@ -14,6 +14,10 @@ categories = ["asynchronous"]
 # - update readme.md
 rust-version = "1.48.0"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["std", "executor"]
 std = ["alloc"]
@@ -26,6 +30,7 @@ blocking = "1.3.1"
 futures-lite = "1.13.0"
 waker-fn = "1.1.0"
 
+# async-task is a public dependency, the rest aren't
 [dependencies]
 async-task = { version = "4.4.0", default-features = false, optional = true }
 atomic-waker = { version = "1.1.1", optional = true }

@@ -23,13 +23,16 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(coverage, feature(no_coverage))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod channel;
 #[cfg(feature = "executor")]
+#[cfg_attr(docsrs, doc(cfg(feature = "executor")))]
 pub mod executor;
 pub mod lock;
 
@@ -38,6 +41,7 @@ mod event;
 pub use event::{Event, EventListener, IntoNotification, Notification};
 
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub use event::EventListenerRc;
 
 mod sync {
