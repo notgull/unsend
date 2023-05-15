@@ -1,0 +1,13 @@
+[package]
+name = "unsend-hello"
+version = "0.1.0"
+edition = "2021"
+authors = ["John Nunley <jtnunley01@gmail.com>"]
+license = "LGPL-3.0-or-later OR MPL-2.0"
+repository = "https://github.com/notgull/unsend"
+
+[dependencies]
+async-io = "1.13.0"
+futures-lite = "1.13.0"
+httparse = "1.8.0"
+unsend = { version = "0.1.0", path = "../.." }

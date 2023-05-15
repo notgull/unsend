@@ -38,3 +38,9 @@ concurrent-queue = { version = "2.2.0", default-features = false, optional = tru
 futures-lite = { version = "1.13.0", default-features = false, optional = true }
 pin-project-lite = "0.2.9"
 slab = { version = "0.4.8", default-features = false, optional = true }
+
+[workspace]
+members = [
+    "comparisons/unsend-hello",
+    "comparisons/tokio-hello"
+]
