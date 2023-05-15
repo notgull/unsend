@@ -19,6 +19,7 @@
 // You should have received a copy of the GNU Lesser General Public License and the Mozilla
 // Public License along with `unsend`. If not, see <https://www.gnu.org/licenses/>.
 
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 fn main() {
@@ -33,6 +34,8 @@ fn main() {
 }
 
 async fn main2() -> Result<(), Box<dyn std::error::Error>> {
+    let data = Arc::new(Mutex::new(0));
+
     // Bind to a port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8000").await?;
 
@@ -40,9 +43,11 @@ async fn main2() -> Result<(), Box<dyn std::error::Error>> {
     println!("Listening on {:?}", listener.local_addr()?);
     loop {
         let (conn, _) = listener.accept().await?;
+
         // Spawn a new task.
+        let data = data.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn).await {
+            if let Err(e) = handle_connection(conn, &data).await {
                 eprintln!("Error: {}", e);
             }
         });
@@ -51,7 +56,14 @@ async fn main2() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_connection(
     mut conn: tokio::net::TcpStream,
+    data: &Mutex<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let new_index = {
+        let mut data = data.lock().unwrap();
+        *data += 1;
+        *data
+    };
+
     // Read HTTP headers until we get to "\r\n\r\n"
     let mut data = Vec::new();
     let mut buf_reader = BufReader::new(&mut conn);
@@ -84,8 +96,13 @@ async fn handle_connection(
 
     if body_length == 0 {
         // Just send a hello world.
-        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello world!")
+        let response = format!("Hello, world! {}", new_index);
+        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: ")
             .await?;
+        conn.write_all(response.len().to_string().as_bytes())
+            .await?;
+        conn.write_all(b"\r\n\r\n").await?;
+        conn.write_all(response.as_bytes()).await?;
         return Ok(());
     }
 

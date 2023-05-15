@@ -19,39 +19,63 @@
 // You should have received a copy of the GNU Lesser General Public License and the Mozilla
 // Public License along with `unsend`. If not, see <https://www.gnu.org/licenses/>.
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use smol::io::BufReader;
+use smol::prelude::*;
+use smol::LocalExecutor;
+
+use std::cell::RefCell;
+use std::net::TcpListener;
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    if let Err(e) = rt.block_on(main2()) {
+    if let Err(e) = smol::block_on(main2()) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
 
 async fn main2() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a new executor.
+    let data = RefCell::new(0);
+    let executor = LocalExecutor::new();
+
     // Bind to a port.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8000").await?;
+    let listener = smol::Async::<TcpListener>::bind(([127, 0, 0, 1], 8000))?;
 
     // Wait for incoming connections.
-    println!("Listening on {:?}", listener.local_addr()?);
-    loop {
-        let (conn, _) = listener.accept().await?;
-        // Spawn a new task.
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn).await {
-                eprintln!("Error: {}", e);
-            }
-        });
-    }
+    println!("Listening on {:?}", listener.get_ref().local_addr()?);
+
+    let incoming = listener.incoming();
+    smol::pin!(incoming);
+    executor
+        .run(incoming.try_for_each(|conn| {
+            conn.map(|conn| {
+                // Spawn a new task.
+                let data = &data;
+                let task = executor.spawn(async move {
+                    if let Err(e) = handle_connection(conn, data).await {
+                        eprintln!("Error: {}", e);
+                    }
+                });
+
+                // Detach the task.
+                task.detach();
+            })
+        }))
+        .await?;
+
+    Ok(())
 }
 
 async fn handle_connection(
-    mut conn: tokio::net::TcpStream,
+    mut conn: impl AsyncRead + AsyncWrite + Unpin,
+    index: &RefCell<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let new_index = {
+        let mut index = index.borrow_mut();
+        *index += 1;
+        *index
+    };
+
     // Read HTTP headers until we get to "\r\n\r\n"
     let mut data = Vec::new();
     let mut buf_reader = BufReader::new(&mut conn);
@@ -84,8 +108,13 @@ async fn handle_connection(
 
     if body_length == 0 {
         // Just send a hello world.
-        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello world!")
+        let response = format!("Hello, world! {}", new_index);
+        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: ")
             .await?;
+        conn.write_all(response.len().to_string().as_bytes())
+            .await?;
+        conn.write_all(b"\r\n\r\n").await?;
+        conn.write_all(response.as_bytes()).await?;
         return Ok(());
     }
 

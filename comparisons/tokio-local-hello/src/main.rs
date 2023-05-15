@@ -20,9 +20,10 @@
 // Public License along with `unsend`. If not, see <https://www.gnu.org/licenses/>.
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::task::LocalSet;
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
@@ -33,20 +34,34 @@ fn main() {
 }
 
 async fn main2() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a local task set.
+    let local_set = LocalSet::new();
+
     // Bind to a port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8000").await?;
 
     // Wait for incoming connections.
     println!("Listening on {:?}", listener.local_addr()?);
-    loop {
-        let (conn, _) = listener.accept().await?;
-        // Spawn a new task.
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn).await {
-                eprintln!("Error: {}", e);
+    let local_set = &local_set;
+    local_set
+        .run_until(async move {
+            loop {
+                let (conn, _) = listener.accept().await?;
+
+                // Spawn a new task.
+                local_set.spawn_local(async move {
+                    if let Err(e) = handle_connection(conn).await {
+                        eprintln!("Error: {}", e);
+                    }
+                });
             }
-        });
-    }
+
+            #[allow(unreachable_code)]
+            std::io::Result::Ok(())
+        })
+        .await?;
+
+    Ok(())
 }
 
 async fn handle_connection(

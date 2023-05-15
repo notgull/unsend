@@ -20,9 +20,13 @@
 // Public License along with `unsend`. If not, see <https://www.gnu.org/licenses/>.
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::task::LocalSet;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
@@ -33,25 +37,48 @@ fn main() {
 }
 
 async fn main2() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a local task set.
+    let local_set = LocalSet::new();
+    let index = Rc::new(RefCell::new(0));
+
     // Bind to a port.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8000").await?;
 
     // Wait for incoming connections.
     println!("Listening on {:?}", listener.local_addr()?);
-    loop {
-        let (conn, _) = listener.accept().await?;
-        // Spawn a new task.
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(conn).await {
-                eprintln!("Error: {}", e);
+    let local_set = &local_set;
+    local_set
+        .run_until(async move {
+            loop {
+                let (conn, _) = listener.accept().await?;
+
+                // Spawn a new task.
+                let index = index.clone();
+                local_set.spawn_local(async move {
+                    if let Err(e) = handle_connection(conn, &index).await {
+                        eprintln!("Error: {}", e);
+                    }
+                });
             }
-        });
-    }
+
+            #[allow(unreachable_code)]
+            std::io::Result::Ok(())
+        })
+        .await?;
+
+    Ok(())
 }
 
 async fn handle_connection(
     mut conn: tokio::net::TcpStream,
+    index: &RefCell<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let new_index = {
+        let mut index = index.borrow_mut();
+        *index += 1;
+        *index
+    };
+
     // Read HTTP headers until we get to "\r\n\r\n"
     let mut data = Vec::new();
     let mut buf_reader = BufReader::new(&mut conn);
@@ -84,8 +111,13 @@ async fn handle_connection(
 
     if body_length == 0 {
         // Just send a hello world.
-        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nHello world!")
+        let response = format!("Hello, world! {}", new_index);
+        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: ")
             .await?;
+        conn.write_all(response.len().to_string().as_bytes())
+            .await?;
+        conn.write_all(b"\r\n\r\n").await?;
+        conn.write_all(response.as_bytes()).await?;
         return Ok(());
     }
 

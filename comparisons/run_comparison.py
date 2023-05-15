@@ -23,7 +23,6 @@
 
 import subprocess as sp
 import os
-import sys
 import matplotlib.pyplot as plt
 
 def processWrkOutput(output):
@@ -34,6 +33,7 @@ def processWrkOutput(output):
 
     # Get the line with "Req/Sec" in it
     reqSecLine = [line for line in lines if "Req/Sec" in line][0]
+    print(reqSecLine)
 
     # Split by whitespace and filter out empty strings.
     reqSecLine = [item for item in reqSecLine.split(" ") if item != ""]
@@ -53,6 +53,8 @@ def processWrkOutput(output):
 def runWrkForPackage(package):
     """Runs the `wrk` command for the given package"""
 
+    print(f"Running wrk for {package}...")
+
     # Run the "cargo build --release" command for the package.
     sp.run(["cargo", "build", "--release", "-p", package])
 
@@ -60,7 +62,7 @@ def runWrkForPackage(package):
     process = sp.Popen(["cargo", "run", "--release", "-p", package], stdout=sp.PIPE, stderr=sp.PIPE)
 
     # Run the wrk command.
-    wrk = sp.run(["wrk", "-t12", "-c400", "-d30s", "http://localhost:8000/index.html"], stdout=sp.PIPE, stderr=sp.PIPE)
+    wrk = sp.run(["wrk", "-t12", "-c400", "-d2s", "http://localhost:8000/index.html"], stdout=sp.PIPE, stderr=sp.PIPE)
 
     # Kill the process.
     process.kill()
@@ -69,7 +71,7 @@ def runWrkForPackage(package):
     output = wrk.stdout.decode("utf-8")
     return processWrkOutput(output)
 
-def runCollectionAndPlot(packages, outPath):
+def runCollectionAndPlot(packages, outPath, title):
     """Runs the list of packages and plots them"""
 
     # Run the wrk command for each package.
@@ -78,9 +80,14 @@ def runCollectionAndPlot(packages, outPath):
     # Plot the results.
     plt.bar(packages, results)
     plt.ylabel("Requests per second")
+    plt.title(title)
     plt.savefig(outPath)
 
-HELLO = ["unsend-hello", "tokio-hello"]
+    # Clear the plot.
+    plt.clf()
+
+HELLO = ["unsend-hello", "tokio-hello", "tokio-local-hello", "smol-hello", "smol-local-hello"]
+LOCK = ["unsend-lock", "tokio-lock", "tokio-local-lock", "smol-lock", "smol-local-lock"]
 
 def main():
     """Main function"""
@@ -89,7 +96,8 @@ def main():
     os.makedirs("out", exist_ok=True)
 
     # Run the hello world example.
-    runCollectionAndPlot(HELLO, "out/hello.png")
+    runCollectionAndPlot(HELLO, "out/hello.png", "Hello world HTTP server")
+    runCollectionAndPlot(LOCK, "out/lock.png", "Locking HTTP server")
 
 if __name__ == "__main__":
     main()

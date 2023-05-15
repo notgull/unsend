@@ -1,5 +1,5 @@
 [package]
-name = "tokio-hello"
+name = "tokio-local-hello"
 version = "0.1.0"
 edition = "2021"
 authors = ["John Nunley <jtnunley01@gmail.com>"]

@@ -42,5 +42,13 @@ slab = { version = "0.4.8", default-features = false, optional = true }
 [workspace]
 members = [
     "comparisons/unsend-hello",
-    "comparisons/tokio-hello"
+    "comparisons/tokio-hello",
+    "comparisons/tokio-local-hello",
+    "comparisons/smol-hello",
+    "comparisons/smol-local-hello",
+    "comparisons/unsend-lock",
+    "comparisons/tokio-lock",
+    "comparisons/tokio-local-lock",
+    "comparisons/smol-lock",
+    "comparisons/smol-local-lock",
 ]
