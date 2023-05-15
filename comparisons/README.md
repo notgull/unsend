@@ -4,7 +4,7 @@ Comparison between `unsend` and other `async` runtimes.
 
 ## Basic "Hello World" Server
 
-![Hello World](https://raw.githubusercontent.com/notgull/unsend/main/comparisons/hello-world.png)
+![Hello World](https://raw.githubusercontent.com/notgull/unsend/main/comparisons/hello.png)
 
 ## "Hello World" but with contention
 
