@@ -93,7 +93,7 @@ pin_project_lite::pin_project! {
 impl<'a, T> EventListener<'a, T> {
     /// Create a new event listener.
     #[inline]
-    pub const fn new(event: &'a Event<T>) -> Self {
+    pub fn new(event: &'a Event<T>) -> Self {
         Self {
             listener: Listener::new(event),
         }
@@ -155,7 +155,7 @@ struct Listener<T, B: Borrow<Event<T>> + Clone> {
 
 impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
     /// Create a new event listener.
-    const fn new(event: B) -> Self {
+    fn new(event: B) -> Self {
         Self {
             event,
             in_list: false,
@@ -277,6 +277,7 @@ impl<T, B: Borrow<Event<T>> + Clone> Listener<T, B> {
     /// # Safety
     ///
     /// We must be inserted into the linked list.
+    #[allow(unused_unsafe)]
     unsafe fn register(self: Pin<&mut Self>, waker: &Waker) -> RegisterResult<T> {
         let inner = self.event.borrow().0.borrow_mut();
 
