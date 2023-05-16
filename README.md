@@ -43,7 +43,7 @@ Unlike other `async` runtimes, `unsend` deliberately avoids providing certain po
 
 - Future and stream combinators. The [`futures-lite`] and [`futures`] crates provide many more than we could ever provide, and most of them work with thread-unsafe types by default.
 - Thread pooling. As we avoid synchronization in most cases, thread pooling goes against the philosophy of this crate. The [`blocking`] crate provides a good `async`-aware thread pool.
-- An I/O reactor. [`async-io`] provides a decent, minimal reactor that works nearly everywhere. The [`tokio`] crate provides a reactor as well.
+- An I/O reactor. [`async-io`] provides a decent, minimal reactor that works nearly everywhere. The [`tokio`] crate provides a reactor as well. However, in the future it may be a good idea to provide this, as the [`async-io`] reactor involves a substantial amount of synchronization. Please open a PR if you would like to see this feature.
 
 [`futures-lite`]: https://crates.io/crates/futures-lite
 [`futures`]: https://crates.io/crates/futures
@@ -126,6 +126,12 @@ executor
     })
     .await;
 ```
+
+## Credits
+
+Parts of this crate are based on [`smol`] by Stjepan Glavina.
+
+[`smol`]: https://crates.io/crates/smol
 
 ## License
 
