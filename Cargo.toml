@@ -1,6 +1,6 @@
 [package]
 name = "unsend"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2018"
 authors = ["John Nunley <jtnunley01@gmail.com>"]
 description = "A thread unsafe runtime for thread unsafe people"
