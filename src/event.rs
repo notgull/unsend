@@ -98,6 +98,15 @@ impl<'a, T> EventListener<'a, T> {
             listener: Listener::new(event),
         }
     }
+
+    /// Make sure this is inserted into the list.
+    #[inline]
+    pub fn listen(self: Pin<&mut Self>) {
+        let listener = self.project().listener;
+        if !listener.in_list {
+            listener.insert();
+        }
+    }
 }
 
 impl<T> Future for EventListener<'_, T> {
@@ -125,6 +134,15 @@ impl<T> EventListenerRc<T> {
     pub fn new(event: Rc<Event<T>>) -> Self {
         Self {
             listener: Listener::new(event),
+        }
+    }
+
+    /// Make sure this is inserted into the list.
+    #[inline]
+    pub fn listen(self: Pin<&mut Self>) {
+        let listener = self.project().listener;
+        if !listener.in_list {
+            listener.insert();
         }
     }
 }
