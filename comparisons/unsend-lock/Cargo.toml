@@ -8,6 +8,6 @@ repository = "https://github.com/notgull/unsend"
 
 [dependencies]
 async-io = "1.13.0"
-futures-lite = "1.13.0"
+futures-lite = "2.0.0"
 httparse = "1.8.0"
 unsend = { version = "0.2.0", path = "../.." }
