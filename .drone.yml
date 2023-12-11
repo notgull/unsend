@@ -2,13 +2,6 @@ kind: pipeline
 type: docker
 name: tidy
 
-trigger:
-  event:
-    - push
-    - pull_request
-  branch:
-    - main
-
 steps:
   - name: tidy
     image: notgull/ci:latest
@@ -22,13 +15,6 @@ name: test-stable
 
 depends_on:
   - tidy
-
-trigger:
-  event:
-    - push
-    - pull_request
-  branch:
-    - main
 
 steps:
   - name: test
@@ -44,13 +30,6 @@ name: test-beta
 depends_on:
   - tidy
 
-trigger:
-  event:
-    - push
-    - pull_request
-  branch:
-    - main
-
 steps:
   - name: test
     image: notgull/ci:latest
@@ -65,13 +44,6 @@ name: test-nightly
 depends_on:
   - tidy
 
-trigger:
-  event:
-    - push
-    - pull_request
-  branch:
-    - main
-
 steps:
   - name: test
     image: notgull/ci:latest
@@ -85,13 +57,6 @@ name: test-msrv
 
 depends_on:
   - tidy
-
-trigger:
-  event:
-    - push
-    - pull_request
-  branch:
-    - main
 
 steps:
   - name: test
@@ -131,12 +96,6 @@ steps:
 kind: pipeline
 type: docker
 name: github
-
-trigger:
-  branch:
-    - main
-  event:
-    - push
 
 steps:
   - name: mirror to GitHub
