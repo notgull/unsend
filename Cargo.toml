@@ -33,7 +33,7 @@ waker-fn = "1.1.0"
 # async-task is a public dependency, the rest aren't
 [dependencies]
 async-task = { version = "4.4.0", default-features = false, optional = true }
-atomic-waker = { version = "1.1.1", optional = true }
+atomic-waker = { version = "1.1.2", optional = true }
 concurrent-queue = { version = "2.2.0", default-features = false, optional = true }
 futures-lite = { version = "1.13.0", default-features = false, optional = true }
 pin-project-lite = "0.2.9"
