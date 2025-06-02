@@ -41,7 +41,7 @@ pub struct Executor<'a, T = DefaultThreadId> {
     state: Arc<State<T>>,
 
     /// Capture the invariant lifetime.
-    _marker: PhantomData<&'a Cell<Rc<()>>>,
+    _marker: PhantomData<&'a mut &'a Cell<Rc<()>>>,
 }
 
 impl<T> Drop for Executor<'_, T> {
